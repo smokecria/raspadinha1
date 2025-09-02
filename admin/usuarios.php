@@ -2,13 +2,62 @@
 include '../includes/session.php';
 include '../conexao.php';
 include '../includes/notiflix.php';
+include 'includes/auth_check.php';
 
-$usuarioId = $_SESSION['usuario_id'];
-$admin = ($stmt = $pdo->prepare("SELECT admin FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
+// Se for moderador, filtrar apenas seus afiliados
+$whereClause = "";
+$params = [];
 
-if ($admin != 1) {
-    $_SESSION['message'] = ['type' => 'warning', 'text' => 'Você não é um administrador!'];
-    header("Location: /");
+if ($isModerador && !$isAdmin) {
+    $affiliateIds = getModeratorAffiliateIds($pdo, $usuarioId);
+    if (empty($affiliateIds)) {
+        $whereClause = "WHERE u.id = -1"; // Nenhum resultado
+        $params = [];
+    } else {
+        $placeholders = str_repeat('?,', count($affiliateIds) - 1) . '?';
+        $whereClause = "WHERE u.id IN ($placeholders)";
+        $params = $affiliateIds;
+    }
+}
+
+// Adicionar saldo para afiliado (apenas moderadores e admins)
+if (isset($_POST['adicionar_saldo'])) {
+    $target_user_id = $_POST['target_user_id'];
+    $valor = floatval(str_replace(',', '.', $_POST['valor']));
+    
+    // Verificar permissão
+    if ($isModerador && !$isAdmin && !canModeratorAccess($pdo, $usuarioId, $target_user_id)) {
+        $_SESSION['failure'] = 'Você não tem permissão para adicionar saldo a este usuário!';
+        header('Location: '.$_SERVER['PHP_SELF']);
+        exit;
+    }
+    
+    if ($valor > 0) {
+        try {
+            $pdo->beginTransaction();
+            
+            // Adicionar saldo ao usuário
+            $stmt = $pdo->prepare("UPDATE usuarios SET saldo = saldo + ? WHERE id = ?");
+            $stmt->execute([$valor, $target_user_id]);
+            
+            // Buscar nome do usuário afetado
+            $stmt = $pdo->prepare("SELECT nome FROM usuarios WHERE id = ?");
+            $stmt->execute([$target_user_id]);
+            $nomeAfetado = $stmt->fetchColumn();
+            
+            // Registrar log
+            logModeratorAction($pdo, $usuarioId, 'ADICIONAR_SALDO', "Adicionou R$ {$valor} ao usuário {$nomeAfetado}", $target_user_id, $valor);
+            
+            $pdo->commit();
+            $_SESSION['success'] = "Saldo de R$ {$valor} adicionado com sucesso!";
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            $_SESSION['failure'] = 'Erro ao adicionar saldo!';
+        }
+    } else {
+        $_SESSION['failure'] = 'Valor deve ser maior que zero!';
+    }
+    header('Location: '.$_SERVER['PHP_SELF']);
     exit;
 }
 
@@ -50,9 +99,6 @@ if (isset($_GET['toggle_influencer'])) {
     exit;
 }
 
-$nome = ($stmt = $pdo->prepare("SELECT nome FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
-$nome = $nome ? explode(' ', $nome)[0] : null;
-
 $search = isset($_GET['search']) ? $_GET['search'] : '';
 $query = "SELECT u.*, ui.email as email_indicador FROM usuarios u LEFT JOIN usuarios ui ON u.indicacao = ui.id WHERE 1=1";
 
@@ -77,6 +123,20 @@ $total_usuarios = count($usuarios);
 $usuarios_ativos = array_filter($usuarios, function($u) { return $u['banido'] == 0; });
 $influencers = array_filter($usuarios, function($u) { return $u['influencer'] == 1; });
 $total_saldo = array_sum(array_column($usuarios, 'saldo'));
+
+// Buscar usuários com filtro baseado na permissão
+if ($whereClause) {
+    $stmt = $pdo->prepare("SELECT u.*, 
+                          (SELECT nome FROM usuarios WHERE id = u.indicacao) as indicador_nome
+                          FROM usuarios u $whereClause ORDER BY u.created_at DESC");
+    $stmt->execute($params);
+} else {
+    $stmt = $pdo->prepare("SELECT u.*, 
+                          (SELECT nome FROM usuarios WHERE id = u.indicacao) as indicador_nome
+                          FROM usuarios u ORDER BY u.created_at DESC");
+    $stmt->execute();
+}
+$usuarios = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
 <!DOCTYPE html>
@@ -1158,18 +1218,26 @@ $total_saldo = array_sum(array_column($usuarios, 'saldo'));
                     <div class="nav-icon"><i class="fas fa-money-bill-wave"></i></div>
                     <div class="nav-text">Saques</div>
                 </a>
+                <?php if ($isAdmin): ?>
+                <a href="moderadores.php" class="nav-item">
+                    <div class="nav-icon"><i class="fas fa-user-shield"></i></div>
+                    <div class="nav-text">Moderadores</div>
+                </a>
+                <?php endif; ?>
             </div>
             
             <div class="nav-section">
                 <div class="nav-section-title">Sistema</div>
+                <?php if ($isAdmin): ?>
                 <a href="config.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-cogs"></i></div>
                     <div class="nav-text">Configurações</div>
                 </a>
                 <a href="gateway.php" class="nav-item">
-                    <div class="nav-icon"><i class="fas fa-usd"></i></div>
+                    <div class="nav-icon"><i class="fas fa-dollar-sign"></i></div>
                     <div class="nav-text">Gateway</div>
                 </a>
+                <?php endif; ?>
                 <a href="banners.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-images"></i></div>
                     <div class="nav-text">Banners</div>
@@ -1337,20 +1405,32 @@ $total_saldo = array_sum(array_column($usuarios, 'saldo'));
                                         <i class="fa-solid fa-user-plus info-icon"></i>
                                         <span>Indicado por: <?= $usuario['email_indicador'] ? htmlspecialchars($usuario['email_indicador']) : 'Ninguém' ?></span>
                                     </div>
+                                    <?php if (!empty($usuario['indicador_nome'])): ?>
+                                    <p class="user-referrer">Indicado por: <?= htmlspecialchars($usuario['indicador_nome']) ?></p>
+                                    <?php endif; ?>
                                 </div>
                                 
                                 <div class="action-buttons">
+                                    <?php if ($isAdmin || ($isModerador && canModeratorAccess($pdo, $usuarioId, $usuario['id']))): ?>
+                                    <button type="button" class="btn-action btn-balance" onclick="openAddBalanceModal(<?= $usuario['id'] ?>, '<?= htmlspecialchars($usuario['nome']) ?>')">
+                                        <i class="fas fa-plus-circle"></i>
+                                        Saldo
+                                    </button>
+                                    <?php endif; ?>
+                                    
                                     <button onclick="abrirModalEditarSaldo('<?= $usuario['id'] ?>', '<?= number_format($usuario['saldo'], 2, '.', '') ?>')" 
                                             class="action-btn btn-balance">
                                         <i class="fa-solid fa-edit"></i>
                                         Editar Saldo
                                     </button>
                                     
+                                    <?php if ($isAdmin): ?>
                                     <a href="?toggle_banido&id=<?= $usuario['id'] ?>" 
                                        class="action-btn <?= $usuario['banido'] ? 'btn-unban' : 'btn-ban' ?>">
                                         <i class="fa-solid fa-<?= $usuario['banido'] ? 'user-check' : 'user-slash' ?>"></i>
                                         <?= $usuario['banido'] ? 'Desbanir' : 'Banir' ?>
                                     </a>
+                                    <?php endif; ?>
                                     
                                     <a href="?toggle_influencer&id=<?= $usuario['id'] ?>" 
                                        class="action-btn <?= $usuario['influencer'] ? 'btn-remove-inf' : 'btn-influencer' ?>">
@@ -1396,6 +1476,54 @@ $total_saldo = array_sum(array_column($usuarios, 'saldo'));
                     <button type="button" onclick="fecharModal()" class="modal-btn modal-btn-secondary">
                         <i class="fa-solid fa-times"></i>
                         Cancelar
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Modal para Adicionar Saldo -->
+    <div class="modal" id="addBalanceModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">
+                    <i class="fas fa-wallet"></i>
+                    Adicionar Saldo
+                </h3>
+                <button type="button" class="modal-close" onclick="closeAddBalanceModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <form method="POST" id="addBalanceForm">
+                <div class="modal-body">
+                    <input type="hidden" name="target_user_id" id="targetUserId">
+                    
+                    <div style="margin-bottom: 1.5rem;">
+                        <label style="color: #e5e7eb; font-weight: 600; margin-bottom: 0.75rem; display: block;">
+                            <i class="fas fa-user" style="color: #22c55e; margin-right: 0.5rem;"></i>
+                            Usuário Selecionado
+                        </label>
+                        <div id="selectedUserName" style="color: #22c55e; font-weight: 600; font-size: 1.1rem;"></div>
+                    </div>
+                    
+                    <div style="margin-bottom: 1.5rem;">
+                        <label style="color: #e5e7eb; font-weight: 600; margin-bottom: 0.75rem; display: block;">
+                            <i class="fas fa-dollar-sign" style="color: #22c55e; margin-right: 0.5rem;"></i>
+                            Valor a Adicionar (R$)
+                        </label>
+                        <input type="text" name="valor" id="valorInput" class="form-input" placeholder="Ex: 100,00" required style="width: 100%; background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 1rem 1.25rem; color: white; font-size: 1rem;">
+                    </div>
+                </div>
+                
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal btn-cancel" onclick="closeAddBalanceModal()">
+                        <i class="fas fa-times"></i>
+                        Cancelar
+                    </button>
+                    <button type="submit" name="adicionar_saldo" class="btn-modal btn-save">
+                        <i class="fas fa-plus-circle"></i>
+                        Adicionar Saldo
                     </button>
                 </div>
             </form>
@@ -1475,6 +1603,35 @@ $total_saldo = array_sum(array_column($usuarios, 'saldo'));
             }
         });
         
+        // Modal para adicionar saldo
+        function openAddBalanceModal(userId, userName) {
+            document.getElementById('targetUserId').value = userId;
+            document.getElementById('selectedUserName').textContent = userName;
+            document.getElementById('addBalanceModal').classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+        
+        function closeAddBalanceModal() {
+            document.getElementById('addBalanceModal').classList.remove('active');
+            document.body.style.overflow = 'auto';
+            document.getElementById('addBalanceForm').reset();
+        }
+        
+        // Formatação de valor monetário
+        document.getElementById('valorInput').addEventListener('input', function(e) {
+            let value = e.target.value.replace(/\D/g, '');
+            if (value === '') return;
+            value = (value / 100).toFixed(2) + '';
+            value = value.replace(".", ",");
+            e.target.value = value;
+        });
+        
+        document.getElementById('addBalanceModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeAddBalanceModal();
+            }
+        });
+        
         // Smooth scroll behavior
         document.documentElement.style.scrollBehavior = 'smooth';
         
@@ -1511,6 +1668,148 @@ $total_saldo = array_sum(array_column($usuarios, 'saldo'));
                 }, index * 150);
             });
         });
+        
+        // Estilos adicionais para o modal e botão de saldo
+        const additionalStyles = `
+            .btn-balance {
+                background: rgba(34, 197, 94, 0.2);
+                color: #22c55e;
+                border: 1px solid rgba(34, 197, 94, 0.3);
+            }
+            
+            .btn-balance:hover {
+                background: rgba(34, 197, 94, 0.3);
+                transform: translateY(-2px);
+                box-shadow: 0 8px 20px rgba(34, 197, 94, 0.2);
+            }
+            
+            .user-referrer {
+                color: #6b7280;
+                font-size: 0.8rem;
+                margin-top: 0.25rem;
+            }
+            
+            .modal {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.8);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 2000;
+                opacity: 0;
+                visibility: hidden;
+                transition: all 0.3s ease;
+                backdrop-filter: blur(8px);
+            }
+            
+            .modal.active {
+                opacity: 1;
+                visibility: visible;
+            }
+            
+            .modal-content {
+                background: linear-gradient(135deg, rgba(20, 20, 20, 0.95) 0%, rgba(10, 10, 10, 0.98) 100%);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 20px;
+                padding: 2.5rem;
+                max-width: 500px;
+                width: 90%;
+                max-height: 90vh;
+                overflow-y: auto;
+                position: relative;
+                box-shadow: 0 25px 80px rgba(0, 0, 0, 0.6);
+            }
+            
+            .modal-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 2rem;
+                padding-bottom: 1rem;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            
+            .modal-title {
+                font-size: 1.5rem;
+                font-weight: 700;
+                color: #ffffff;
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+            }
+            
+            .modal-title i {
+                color: #22c55e;
+            }
+            
+            .modal-close {
+                background: rgba(239, 68, 68, 0.2);
+                border: 1px solid rgba(239, 68, 68, 0.3);
+                color: #ef4444;
+                width: 40px;
+                height: 40px;
+                border-radius: 10px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            
+            .modal-close:hover {
+                background: rgba(239, 68, 68, 0.3);
+                transform: scale(1.05);
+            }
+            
+            .modal-actions {
+                display: flex;
+                gap: 1rem;
+                margin-top: 2rem;
+            }
+            
+            .btn-modal {
+                flex: 1;
+                padding: 1rem 1.5rem;
+                border-radius: 12px;
+                border: none;
+                cursor: pointer;
+                font-weight: 600;
+                transition: all 0.3s ease;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 0.5rem;
+            }
+            
+            .btn-save {
+                background: linear-gradient(135deg, #22c55e, #16a34a);
+                color: white;
+            }
+            
+            .btn-save:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 8px 25px rgba(34, 197, 94, 0.3);
+            }
+            
+            .btn-cancel {
+                background: rgba(107, 114, 128, 0.2);
+                color: #9ca3af;
+                border: 1px solid rgba(107, 114, 128, 0.3);
+            }
+            
+            .btn-cancel:hover {
+                background: rgba(107, 114, 128, 0.3);
+                color: #ffffff;
+            }
+        `;
+        
+        const styleSheet = document.createElement('style');
+        styleSheet.textContent = additionalStyles;
+        document.head.appendChild(styleSheet);
     </script>
 </body>
 </html>
