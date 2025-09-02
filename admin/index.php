@@ -2,64 +2,117 @@
 include '../includes/session.php';
 include '../conexao.php';
 include '../includes/notiflix.php';
+include 'includes/auth_check.php';
 
-$usuarioId = $_SESSION['usuario_id'];
-$admin = ($stmt = $pdo->prepare("SELECT admin FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
+// Estatísticas baseadas na permissão
+if ($isModerador && !$isAdmin) {
+    $affiliateIds = getModeratorAffiliateIds($pdo, $usuarioId);
+    
+    if (empty($affiliateIds)) {
+        $total_usuarios = 0;
+        $total_depositos = 0;
+        $total_saldo = 0;
+        $depositos_recentes = [];
+        $saques_recentes = [];
+    } else {
+        $placeholders = str_repeat('?,', count($affiliateIds) - 1) . '?';
+        
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM usuarios WHERE id IN ($placeholders)");
+        $stmt->execute($affiliateIds);
+        $total_usuarios = $stmt->fetchColumn();
+        
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM depositos WHERE user_id IN ($placeholders) AND status = 'PAID'");
+        $stmt->execute($affiliateIds);
+        $total_depositos = $stmt->fetchColumn();
+        
+        $stmt = $pdo->prepare("SELECT SUM(saldo) FROM usuarios WHERE id IN ($placeholders)");
+        $stmt->execute($affiliateIds);
+        $total_saldo = $stmt->fetchColumn() ?: 0;
+        
+        // Depósitos recentes dos afiliados
+        $stmt = $pdo->prepare("
+            SELECT 
+                u.nome, 
+                d.valor, 
+                d.updated_at 
+            FROM 
+                depositos d
+            INNER JOIN 
+                usuarios u ON d.user_id = u.id
+            WHERE 
+                d.status = 'PAID' AND d.user_id IN ($placeholders)
+            ORDER BY 
+                d.updated_at DESC
+            LIMIT 5
+        ");
+        $stmt->execute($affiliateIds);
+        $depositos_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Saques pendentes dos afiliados
+        $stmt = $pdo->prepare("
+            SELECT 
+                u.nome, 
+                s.valor, 
+                s.updated_at 
+            FROM 
+                saques s
+            INNER JOIN 
+                usuarios u ON s.user_id = u.id
+            WHERE 
+                s.status = 'PENDING' AND s.user_id IN ($placeholders)
+            ORDER BY 
+                s.updated_at DESC
+            LIMIT 5
+        ");
+        $stmt->execute($affiliateIds);
+        $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+} else {
+    // Admin vê tudo
+    $total_usuarios = ($stmt = $pdo->prepare("SELECT COUNT(*) FROM usuarios"))->execute() ? $stmt->fetchColumn() : 0;
+    $total_depositos = ($stmt = $pdo->prepare("SELECT COUNT(*) FROM depositos WHERE status = 'PAID'"))->execute() ? $stmt->fetchColumn() : 0;
+    $total_saldo = ($stmt = $pdo->prepare("SELECT SUM(saldo) FROM usuarios"))->execute() ? $stmt->fetchColumn() : 0;
 
-if( $admin != 1){
-    $_SESSION['message'] = ['type' => 'warning', 'text' => 'Você não é um administrador!'];
-    header("Location: /");
-    exit;
+    $sql = "
+        SELECT 
+            u.nome, 
+            d.valor, 
+            d.updated_at 
+        FROM 
+            depositos d
+        INNER JOIN 
+            usuarios u ON d.user_id = u.id
+        WHERE 
+            d.status = 'PAID'
+        ORDER BY 
+            d.updated_at DESC
+        LIMIT 5
+    ";
+    
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute();
+    $depositos_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    $sql = "
+        SELECT 
+            u.nome, 
+            s.valor, 
+            s.updated_at 
+        FROM 
+            saques s
+        INNER JOIN 
+            usuarios u ON s.user_id = u.id
+        WHERE 
+            s.status = 'PENDING'
+        ORDER BY 
+            s.updated_at DESC
+        LIMIT 5
+    ";
+    
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute();
+    $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
-
-$nome = ($stmt = $pdo->prepare("SELECT nome FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
-$nome = $nome ? explode(' ', $nome)[0] : null;
-
-$total_usuarios = ($stmt = $pdo->prepare("SELECT COUNT(*) FROM usuarios"))->execute() ? $stmt->fetchColumn() : 0;
-$total_depositos = ($stmt = $pdo->prepare("SELECT COUNT(*) FROM depositos WHERE status = 1"))->execute() ? $stmt->fetchColumn() : 0;
-$total_saldo = ($stmt = $pdo->prepare("SELECT SUM(saldo) FROM usuarios"))->execute() ? $stmt->fetchColumn() : 0;
-
-$sql = "
-    SELECT 
-        u.nome, 
-        d.valor, 
-        d.updated_at 
-    FROM 
-        depositos d
-    INNER JOIN 
-        usuarios u ON d.user_id = u.id
-    WHERE 
-        d.status = 'PAID'
-    ORDER BY 
-        d.updated_at DESC
-    LIMIT 5
-";
-
-$stmt = $pdo->prepare($sql);
-$stmt->execute();
-
-$depositos_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-$sql = "
-    SELECT 
-        u.nome, 
-        s.valor, 
-        s.updated_at 
-    FROM 
-        saques s
-    INNER JOIN 
-        usuarios u ON s.user_id = u.id
-    WHERE 
-        s.status = 'PENDING'
-    ORDER BY 
-        s.updated_at DESC
-    LIMIT 5
-";
-
-$stmt = $pdo->prepare($sql);
-$stmt->execute();
-
-$saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 ?>
 
@@ -890,10 +943,21 @@ $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     <div class="nav-icon"><i class="fas fa-money-bill-wave"></i></div>
                     <div class="nav-text">Saques</div>
                 </a>
+                <?php if ($isAdmin): ?>
+                <a href="moderadores.php" class="nav-item">
+                    <div class="nav-icon"><i class="fas fa-user-shield"></i></div>
+                    <div class="nav-text">Moderadores</div>
+                </a>
+                <a href="logs_moderadores.php" class="nav-item">
+                    <div class="nav-icon"><i class="fas fa-clipboard-list"></i></div>
+                    <div class="nav-text">Logs Moderadores</div>
+                </a>
+                <?php endif; ?>
             </div>
             
             <div class="nav-section">
                 <div class="nav-section-title">Sistema</div>
+                <?php if ($isAdmin): ?>
                 <a href="config.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-cogs"></i></div>
                     <div class="nav-text">Configurações</div>
@@ -902,6 +966,7 @@ $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     <div class="nav-icon"><i class="fas fa-usd"></i></div>
                     <div class="nav-text">Gateway</div>
                 </a>
+                <?php endif; ?>
                 <a href="banners.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-images"></i></div>
                     <div class="nav-text">Banners</div>
@@ -942,8 +1007,15 @@ $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
         <div class="dashboard-content">
             <!-- Welcome Section -->
             <section class="welcome-section">
-                <h2 class="welcome-title">Olá, <?= htmlspecialchars($nome) ?>!</h2>
-                <p class="welcome-subtitle">Aqui está um resumo das principais métricas e atividades do sistema</p>
+                <h2 class="welcome-title">
+                    Olá, <?= htmlspecialchars($nome) ?>!
+                    <?php if ($isModerador && !$isAdmin): ?>
+                        <span style="background: rgba(59, 130, 246, 0.2); color: #3b82f6; padding: 0.25rem 0.75rem; border-radius: 8px; font-size: 0.6rem; margin-left: 1rem;">MODERADOR</span>
+                    <?php endif; ?>
+                </h2>
+                <p class="welcome-subtitle">
+                    <?= $isModerador && !$isAdmin ? 'Resumo das métricas dos seus afiliados' : 'Aqui está um resumo das principais métricas e atividades do sistema' ?>
+                </p>
             </section>
             
             <!-- Enhanced Stats Grid -->
@@ -959,7 +1031,7 @@ $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         </div>
                     </div>
                     <div class="stat-value"><?= number_format($total_usuarios, 0, ',', '.') ?></div>
-                    <div class="stat-label">Total de Usuários Ativos</div>
+                    <div class="stat-label"><?= $isModerador && !$isAdmin ? 'Meus Afiliados' : 'Total de Usuários Ativos' ?></div>
                 </div>
                 
                 <div class="stat-card">
@@ -973,7 +1045,7 @@ $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         </div>
                     </div>
                     <div class="stat-value"><?= number_format($total_depositos, 0, ',', '.') ?></div>
-                    <div class="stat-label">Depósitos Confirmados</div>
+                    <div class="stat-label"><?= $isModerador && !$isAdmin ? 'Depósitos dos Afiliados' : 'Depósitos Confirmados' ?></div>
                 </div>
                 
                 <div class="stat-card">
@@ -987,7 +1059,7 @@ $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         </div>
                     </div>
                     <div class="stat-value">R$ <?= number_format($total_saldo, 2, ',', '.') ?></div>
-                    <div class="stat-label">Saldo Total em Carteiras</div>
+                    <div class="stat-label"><?= $isModerador && !$isAdmin ? 'Saldo dos Afiliados' : 'Saldo Total em Carteiras' ?></div>
                 </div>
             </section>
             
@@ -999,7 +1071,7 @@ $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         <div class="activity-icon">
                             <i class="fas fa-money-bill-transfer"></i>
                         </div>
-                        <h3 class="activity-title">Depósitos Recentes</h3>
+                        <h3 class="activity-title"><?= $isModerador && !$isAdmin ? 'Depósitos dos Afiliados' : 'Depósitos Recentes' ?></h3>
                     </div>
                     
                     <?php if (!empty($depositos_recentes)): ?>
@@ -1032,7 +1104,7 @@ $saques_recentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         <div class="activity-icon">
                             <i class="fas fa-money-bill-wave"></i>
                         </div>
-                        <h3 class="activity-title">Saques Pendentes</h3>
+                        <h3 class="activity-title"><?= $isModerador && !$isAdmin ? 'Saques dos Afiliados' : 'Saques Pendentes' ?></h3>
                     </div>
                     
                     <?php if (!empty($saques_recentes)): ?>

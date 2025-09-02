@@ -3,18 +3,23 @@ ob_start();
 include '../includes/session.php';
 include '../conexao.php';
 include '../includes/notiflix.php';
+include 'includes/auth_check.php';
 
-$usuarioId = $_SESSION['usuario_id'];
-$admin = ($stmt = $pdo->prepare("SELECT admin FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
+// Se for moderador, filtrar apenas seus afiliados
+$whereClause = "";
+$params = [];
 
-if ($admin != 1) {
-    $_SESSION['message'] = ['type' => 'warning', 'text' => 'Você não é um administrador!'];
-    header("Location: /");
-    exit;
+if ($isModerador && !$isAdmin) {
+    $affiliateIds = getModeratorAffiliateIds($pdo, $usuarioId);
+    if (empty($affiliateIds)) {
+        $whereClause = "WHERE u.id = -1"; // Nenhum resultado
+        $params = [];
+    } else {
+        $placeholders = str_repeat('?,', count($affiliateIds) - 1) . '?';
+        $whereClause = "WHERE u.id IN ($placeholders)";
+        $params = $affiliateIds;
+    }
 }
-
-$nome = ($stmt = $pdo->prepare("SELECT nome FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
-$nome = $nome ? explode(' ', $nome)[0] : null;
 
 if (isset($_GET['toggle_banido'])) {
     $id = $_GET['id'];
@@ -1658,18 +1663,26 @@ $influencers_count = count(array_filter($afiliados, function($a) { return $a['in
                     <div class="nav-icon"><i class="fas fa-money-bill-wave"></i></div>
                     <div class="nav-text">Saques</div>
                 </a>
+                <?php if ($isAdmin): ?>
+                <a href="moderadores.php" class="nav-item">
+                    <div class="nav-icon"><i class="fas fa-user-shield"></i></div>
+                    <div class="nav-text">Moderadores</div>
+                </a>
+                <?php endif; ?>
             </div>
             
             <div class="nav-section">
                 <div class="nav-section-title">Sistema</div>
+                <?php if ($isAdmin): ?>
                 <a href="config.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-cogs"></i></div>
                     <div class="nav-text">Configurações</div>
                 </a>
                 <a href="gateway.php" class="nav-item">
-                    <div class="nav-icon"><i class="fas fa-usd"></i></div>
+                    <div class="nav-icon"><i class="fas fa-dollar-sign"></i></div>
                     <div class="nav-text">Gateway</div>
                 </a>
+                <?php endif; ?>
                 <a href="banners.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-images"></i></div>
                     <div class="nav-text">Banners</div>
@@ -1710,8 +1723,12 @@ $influencers_count = count(array_filter($afiliados, function($a) { return $a['in
         <div class="page-content">
             <!-- Welcome Section -->
             <section class="welcome-section">
-                <h2 class="welcome-title">Gerenciar Afiliados</h2>
-                <p class="welcome-subtitle">Visualize e gerencie todos os afiliados e suas comissões na plataforma</p>
+                <h2 class="welcome-title">
+                    <?= $isModerador && !$isAdmin ? 'Meus Afiliados' : 'Gestão de Afiliados' ?>
+                </h2>
+                <p class="welcome-subtitle">
+                    <?= $isModerador && !$isAdmin ? 'Gerencie seus afiliados e sub-afiliados' : 'Monitore e gerencie todos os afiliados da plataforma' ?>
+                </p>
             </section>
             
             <!-- Stats Grid -->

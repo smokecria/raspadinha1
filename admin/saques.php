@@ -2,16 +2,30 @@
 include '../includes/session.php';
 include '../conexao.php';
 include '../includes/notiflix.php';
+include 'includes/auth_check.php';
 
-$usuarioId = $_SESSION['usuario_id'];
-$admin = ($stmt = $pdo->prepare("SELECT admin FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
-
-if ($admin != 1) {
-    $_SESSION['message'] = ['type' => 'warning', 'text' => 'Você não é um administrador!'];
-    header("Location: /");
+// Moderadores não podem aprovar/recusar saques, apenas visualizar
+if ($isModerador && !$isAdmin && (isset($_POST['aprovar_saque']) || isset($_POST['recusar_saque']))) {
+    $_SESSION['failure'] = 'Você não tem permissão para aprovar ou recusar saques!';
+    header('Location: '.$_SERVER['PHP_SELF']);
     exit;
 }
 
+// Se for moderador, filtrar apenas saques de seus afiliados
+$whereClause = "";
+$params = [];
+
+if ($isModerador && !$isAdmin) {
+    $affiliateIds = getModeratorAffiliateIds($pdo, $usuarioId);
+    if (empty($affiliateIds)) {
+        $whereClause = "WHERE saques.user_id = -1"; // Nenhum resultado
+        $params = [];
+    } else {
+        $placeholders = str_repeat('?,', count($affiliateIds) - 1) . '?';
+        $whereClause = "WHERE saques.user_id IN ($placeholders)";
+        $params = $affiliateIds;
+    }
+}
 if (isset($_POST['aprovar_saque'])) {
     $saque_id = $_POST['saque_id'];
     
@@ -266,13 +280,20 @@ if (isset($_POST['reprovar_saque'])) {
     exit;
 }
 
-$nome = ($stmt = $pdo->prepare("SELECT nome FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
-$nome = $nome ? explode(' ', $nome)[0] : null;
-
-$stmt = $pdo->query("SELECT saques.id, saques.user_id, saques.valor, saques.cpf, saques.status, saques.updated_at, saques.gateway, usuarios.nome 
+// Buscar saques com filtro baseado na permissão
+if ($whereClause) {
+    $stmt = $pdo->prepare("SELECT saques.id, saques.user_id, saques.transactionId, saques.nome, saques.cpf, saques.valor, saques.status, saques.updated_at, usuarios.nome as usuario_nome 
+                     FROM saques 
+                     JOIN usuarios ON saques.user_id = usuarios.id
+                     $whereClause
+                     ORDER BY saques.updated_at DESC");
+    $stmt->execute($params);
+} else {
+    $stmt = $pdo->query("SELECT saques.id, saques.user_id, saques.transactionId, saques.nome, saques.cpf, saques.valor, saques.status, saques.updated_at, usuarios.nome as usuario_nome 
                      FROM saques 
                      JOIN usuarios ON saques.user_id = usuarios.id
                      ORDER BY saques.updated_at DESC");
+}
 $saques = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Calculate statistics
@@ -1141,10 +1162,17 @@ $activeGateway = $stmt->fetchColumn();
                     <div class="nav-icon"><i class="fas fa-money-bill-wave"></i></div>
                     <div class="nav-text">Saques</div>
                 </a>
+                <?php if ($isAdmin): ?>
+                <a href="moderadores.php" class="nav-item">
+                    <div class="nav-icon"><i class="fas fa-user-shield"></i></div>
+                    <div class="nav-text">Moderadores</div>
+                </a>
+                <?php endif; ?>
             </div>
             
             <div class="nav-section">
                 <div class="nav-section-title">Sistema</div>
+                <?php if ($isAdmin): ?>
                 <a href="config.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-cogs"></i></div>
                     <div class="nav-text">Configurações</div>
@@ -1153,6 +1181,7 @@ $activeGateway = $stmt->fetchColumn();
                     <div class="nav-icon"><i class="fas fa-usd"></i></div>
                     <div class="nav-text">Gateway</div>
                 </a>
+                <?php endif; ?>
                 <a href="banners.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-images"></i></div>
                     <div class="nav-text">Banners</div>
@@ -1193,8 +1222,19 @@ $activeGateway = $stmt->fetchColumn();
         <div class="page-content">
             <!-- Welcome Section -->
             <section class="welcome-section">
-                <h2 class="welcome-title">Gestão de Saques</h2>
-                <p class="welcome-subtitle">Aprove ou reprove solicitações de saque via PIX de forma segura</p>
+                <h2 class="welcome-title">
+                    <?= $isModerador && !$isAdmin ? 'Saques dos Meus Afiliados' : 'Controle de Saques' ?>
+                </h2>
+                <p class="welcome-subtitle">
+                    <?= $isModerador && !$isAdmin ? 'Monitore os saques solicitados pelos seus afiliados' : 'Monitore e gerencie todos os saques solicitados na plataforma' ?>
+                </p>
+                
+                <?php if ($isModerador && !$isAdmin): ?>
+                <div style="background: rgba(251, 191, 36, 0.1); border: 1px solid rgba(251, 191, 36, 0.3); border-radius: 12px; padding: 1rem; margin-top: 1rem; color: #fbbf24;">
+                    <i class="fas fa-info-circle"></i>
+                    <strong>Nota:</strong> Como moderador, você pode visualizar os saques mas não pode aprová-los ou recusá-los. Apenas administradores podem fazer isso.
+                </div>
+                <?php endif; ?>
             </section>
             
             <!-- Stats Grid -->
@@ -1288,6 +1328,7 @@ $activeGateway = $stmt->fetchColumn();
                                             </button>
                                         </form>
                                     </div>
+                                    <?php if ($isAdmin): ?>
                                 <?php else: ?>
                                     <div class="withdrawal-actions">
                                         <button class="action-btn btn-disabled" disabled>
@@ -1300,6 +1341,12 @@ $activeGateway = $stmt->fetchColumn();
                                 <div class="withdrawal-date">
                                     <i class="fas fa-calendar"></i>
                                     <span><?= date('d/m/Y H:i', strtotime($saque['updated_at'])) ?></span>
+                                    <?php else: ?>
+                                    <div style="flex: 1; text-align: center; color: #6b7280; font-size: 0.9rem; padding: 0.75rem;">
+                                        <i class="fas fa-eye"></i>
+                                        Apenas visualização
+                                    </div>
+                                    <?php endif; ?>
                                 </div>
                             </div>
                         <?php endforeach; ?>

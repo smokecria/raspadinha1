@@ -2,23 +2,38 @@
 include '../includes/session.php';
 include '../conexao.php';
 include '../includes/notiflix.php';
+include 'includes/auth_check.php';
 
-$usuarioId = $_SESSION['usuario_id'];
-$admin = ($stmt = $pdo->prepare("SELECT admin FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
+// Se for moderador, filtrar apenas depósitos de seus afiliados
+$whereClause = "";
+$params = [];
 
-if ($admin != 1) {
-    $_SESSION['message'] = ['type' => 'warning', 'text' => 'Você não é um administrador!'];
-    header("Location: /");
-    exit;
+if ($isModerador && !$isAdmin) {
+    $affiliateIds = getModeratorAffiliateIds($pdo, $usuarioId);
+    if (empty($affiliateIds)) {
+        $whereClause = "WHERE depositos.user_id = -1"; // Nenhum resultado
+        $params = [];
+    } else {
+        $placeholders = str_repeat('?,', count($affiliateIds) - 1) . '?';
+        $whereClause = "WHERE depositos.user_id IN ($placeholders)";
+        $params = $affiliateIds;
+    }
 }
 
-$nome = ($stmt = $pdo->prepare("SELECT nome FROM usuarios WHERE id = ?"))->execute([$usuarioId]) ? $stmt->fetchColumn() : null;
-$nome = $nome ? explode(' ', $nome)[0] : null;
-
-$stmt = $pdo->query("SELECT depositos.id, depositos.user_id, depositos.transactionId, depositos.valor, depositos.status, depositos.updated_at, usuarios.nome 
+// Buscar depósitos com filtro baseado na permissão
+if ($whereClause) {
+    $stmt = $pdo->prepare("SELECT depositos.id, depositos.user_id, depositos.transactionId, depositos.valor, depositos.status, depositos.updated_at, usuarios.nome 
+                     FROM depositos 
+                     JOIN usuarios ON depositos.user_id = usuarios.id
+                     $whereClause
+                     ORDER BY depositos.updated_at DESC");
+    $stmt->execute($params);
+} else {
+    $stmt = $pdo->query("SELECT depositos.id, depositos.user_id, depositos.transactionId, depositos.valor, depositos.status, depositos.updated_at, usuarios.nome 
                      FROM depositos 
                      JOIN usuarios ON depositos.user_id = usuarios.id
                      ORDER BY depositos.updated_at DESC");
+}
 $depositos = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Calculate statistics
@@ -865,10 +880,17 @@ $valor_total_pendente = array_sum(array_column($depositos_pendentes, 'valor'));
                     <div class="nav-icon"><i class="fas fa-money-bill-wave"></i></div>
                     <div class="nav-text">Saques</div>
                 </a>
+                <?php if ($isAdmin): ?>
+                <a href="moderadores.php" class="nav-item">
+                    <div class="nav-icon"><i class="fas fa-user-shield"></i></div>
+                    <div class="nav-text">Moderadores</div>
+                </a>
+                <?php endif; ?>
             </div>
             
             <div class="nav-section">
                 <div class="nav-section-title">Sistema</div>
+                <?php if ($isAdmin): ?>
                 <a href="config.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-cogs"></i></div>
                     <div class="nav-text">Configurações</div>
@@ -877,6 +899,7 @@ $valor_total_pendente = array_sum(array_column($depositos_pendentes, 'valor'));
                     <div class="nav-icon"><i class="fas fa-usd"></i></div>
                     <div class="nav-text">Gateway</div>
                 </a>
+                <?php endif; ?>
                 <a href="banners.php" class="nav-item">
                     <div class="nav-icon"><i class="fas fa-images"></i></div>
                     <div class="nav-text">Banners</div>
@@ -917,8 +940,12 @@ $valor_total_pendente = array_sum(array_column($depositos_pendentes, 'valor'));
         <div class="page-content">
             <!-- Welcome Section -->
             <section class="welcome-section">
-                <h2 class="welcome-title">Controle de Depósitos</h2>
-                <p class="welcome-subtitle">Monitore e gerencie todos os depósitos realizados na plataforma</p>
+                <h2 class="welcome-title">
+                    <?= $isModerador && !$isAdmin ? 'Depósitos dos Meus Afiliados' : 'Controle de Depósitos' ?>
+                </h2>
+                <p class="welcome-subtitle">
+                    <?= $isModerador && !$isAdmin ? 'Monitore os depósitos realizados pelos seus afiliados' : 'Monitore e gerencie todos os depósitos realizados na plataforma' ?>
+                </p>
             </section>
             
             <!-- Stats Grid -->
